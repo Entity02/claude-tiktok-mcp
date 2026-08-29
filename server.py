@@ -1,4 +1,5 @@
 import os
+import contextlib
 import secrets
 import time
 import base64
@@ -415,6 +416,15 @@ async def auth_callback(request: Request):
 # --------------------------------------------------------------------------
 # Application
 # --------------------------------------------------------------------------
+# Build the MCP sub-application once. Its session manager must be started
+# by the parent application's lifespan when the MCP app is mounted.
+mcp_app = mcp.streamable_http_app()
+
+@contextlib.asynccontextmanager
+async def lifespan(app):
+    async with mcp.session_manager.run():
+        yield
+
 routes = [
     Route("/.well-known/oauth-authorization-server", oauth_metadata, methods=["GET"]),
     Route("/.well-known/oauth-protected-resource", protected_resource_metadata, methods=["GET"]),
@@ -423,10 +433,14 @@ routes = [
     Route("/token", oauth_token, methods=["POST"]),
     Route("/auth", auth_start, methods=["GET"]),
     Route("/callback", tiktok_callback, methods=["GET"]),
-    Mount("/", app=mcp.streamable_http_app()),
+    Mount("/", app=mcp_app),
 ]
 
-app = Starlette(routes=routes, middleware=[Middleware(BearerAuthMiddleware)])
+app = Starlette(
+    routes=routes,
+    middleware=[Middleware(BearerAuthMiddleware)],
+    lifespan=lifespan,
+)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
