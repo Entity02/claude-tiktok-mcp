@@ -438,7 +438,6 @@ routes = [
 
 app = Starlette(
     routes=routes,
-    middleware=[Middleware(BearerAuthMiddleware)],
     lifespan=lifespan,
 )
 
