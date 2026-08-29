@@ -17,6 +17,7 @@ from starlette.responses import HTMLResponse, PlainTextResponse, RedirectRespons
 from starlette.routing import Mount, Route
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 # --------------------------------------------------------------------------
 # Configuration
@@ -110,7 +111,13 @@ async def tiktok_post(url: str, json_body: dict | None = None, params: dict | No
 # --------------------------------------------------------------------------
 # MCP tools
 # --------------------------------------------------------------------------
-mcp = FastMCP("tiktok-mcp")
+mcp = FastMCP(
+    "tiktok-mcp",
+    transport_security=TransportSecuritySettings(
+        allowed_hosts=["claude-tiktok-production.up.railway.app"],
+        allowed_origins=["https://claude-tiktok-production.up.railway.app"],
+    ),
+)
 
 @mcp.tool()
 async def get_profile() -> dict:
