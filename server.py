@@ -34,6 +34,8 @@ TIKTOK_TOKEN_URL = "https://open.tiktokapis.com/v2/oauth/token/"
 TIKTOK_USER_INFO_URL = "https://open.tiktokapis.com/v2/user/info/"
 TIKTOK_VIDEO_LIST_URL = "https://open.tiktokapis.com/v2/video/list/"
 
+TIKTOK_SCOPES = "user.info.basic,user.info.stats,video.list"
+
 VIDEO_FIELDS = (
     "id,title,video_description,create_time,cover_image_url,"
     "share_url,view_count,like_count,comment_count,share_count"
@@ -183,7 +185,7 @@ async def oauth_metadata(request: Request):
         "grant_types_supported": ["authorization_code", "refresh_token"],
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["none"],
-        "scopes_supported": ["user.info.basic", "video.list"],
+        "scopes_supported": ["user.info.basic", "user.info.stats", "video.list"],
         "client_id_metadata_document_supported": False,
     })
 
@@ -191,7 +193,7 @@ async def protected_resource_metadata(request: Request):
     return JSONResponse({
         "resource": BASE_URL,
         "authorization_servers": [BASE_URL],
-        "scopes_supported": ["user.info.basic", "video.list"],
+        "scopes_supported": ["user.info.basic", "user.info.stats", "video.list"],
     })
 
 async def oauth_register(request: Request):
@@ -224,7 +226,7 @@ async def oauth_authorize(request: Request):
     client_id = q.get("client_id")
     redirect_uri = q.get("redirect_uri")
     response_type = q.get("response_type")
-    scope = q.get("scope", "user.info.basic video.list")
+    scope = q.get("scope", TIKTOK_SCOPES)
     state = q.get("state", "")
     code_challenge = q.get("code_challenge", "")
     code_challenge_method = q.get("code_challenge_method", "")
@@ -249,7 +251,7 @@ async def oauth_authorize(request: Request):
     params = {
         "client_key": TIKTOK_CLIENT_KEY,
         "response_type": "code",
-        "scope": "user.info.basic,video.list",
+        "scope": TIKTOK_SCOPES,
         "redirect_uri": TIKTOK_REDIRECT_URI,
         "state": internal_state,
     }
@@ -357,7 +359,7 @@ async def oauth_token(request: Request):
                     "token_type": "Bearer",
                     "expires_in": 3600,
                     "refresh_token": new_refresh,
-                    "scope": "user.info.basic video.list",
+                    "scope": TIKTOK_SCOPES,
                 })
 
     return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
@@ -410,7 +412,7 @@ async def auth_start(request: Request):
     params = {
         "client_key": TIKTOK_CLIENT_KEY,
         "response_type": "code",
-        "scope": "user.info.basic,video.list",
+        "scope": TIKTOK_SCOPES,
         "redirect_uri": TIKTOK_REDIRECT_URI,
         "state": "setup",
     }
