@@ -33,8 +33,14 @@ TIKTOK_AUTH_URL = "https://www.tiktok.com/v2/auth/authorize/"
 TIKTOK_TOKEN_URL = "https://open.tiktokapis.com/v2/oauth/token/"
 TIKTOK_USER_INFO_URL = "https://open.tiktokapis.com/v2/user/info/"
 TIKTOK_VIDEO_LIST_URL = "https://open.tiktokapis.com/v2/video/list/"
+TIKTOK_POST_INIT_URL = "https://open.tiktokapis.com/v2/post/publish/content/init/"
 
-TIKTOK_SCOPES = "user.info.basic,user.info.stats,video.list"
+# NOTE IMPORTANTE : video.publish a été ajouté ici. Le refresh token existant
+# (obtenu avant cet ajout) ne couvre PAS ce nouveau scope. Il faut refaire
+# l'autorisation TikTok (reconnecter le connecteur Claude) pour obtenir un
+# nouveau token qui inclut video.publish, sinon /post/publish/... renverra
+# une erreur de permission.
+TIKTOK_SCOPES = "user.info.basic,user.info.stats,video.list,video.publish"
 
 VIDEO_FIELDS = (
     "id,title,video_description,create_time,cover_image_url,"
@@ -111,6 +117,87 @@ async def tiktok_post(url: str, json_body: dict | None = None, params: dict | No
     return resp.json()
 
 # --------------------------------------------------------------------------
+# Publication de slideshows (posts photo) — Content Posting API
+# --------------------------------------------------------------------------
+async def _publish_photo_slideshow(
+    access_token: str,
+    images: list[bytes],
+    caption: str = "",
+) -> dict:
+    """
+    Initialise puis exécute la publication d'un slideshow photo sur TikTok.
+
+    images : liste de contenus binaires (bytes) d'images JPEG/PNG déjà décodées.
+    Retourne le publish_id TikTok à utiliser pour vérifier le statut plus tard.
+    """
+    if not images:
+        raise ValueError("Aucune image fournie pour le slideshow.")
+    if len(images) > 35:
+        raise ValueError("TikTok limite les slideshows à 35 photos maximum.")
+
+    init_payload = {
+        "post_info": {
+            "title": caption,
+            "privacy_level": "SELF_ONLY",  # requis en mode sandbox ; à changer une fois l'app validée par TikTok
+            "disable_comment": False,
+            "auto_add_music": True,
+        },
+        "source_info": {
+            "source": "FILE_UPLOAD",
+            "photo_cover_index": 0,
+            "photo_images": [
+                {"index": i} for i in range(len(images))
+            ],
+        },
+        "post_mode": "DIRECT_POST",
+        "media_type": "PHOTO",
+    }
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        init_resp = await client.post(
+            TIKTOK_POST_INIT_URL,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            },
+            json=init_payload,
+        )
+        init_data = init_resp.json()
+
+        if "data" not in init_data or "publish_id" not in init_data.get("data", {}):
+            return {"error": "init_failed", "details": init_data}
+
+        publish_id = init_data["data"]["publish_id"]
+        upload_urls = init_data["data"].get("upload_url", [])
+
+        # TikTok peut renvoyer une seule upload_url couvrant toutes les photos,
+        # ou une par photo selon les comptes/versions d'API. On gère les deux cas.
+        if isinstance(upload_urls, str):
+            upload_urls = [upload_urls] * len(images)
+
+        if len(upload_urls) != len(images):
+            return {
+                "error": "upload_url_mismatch",
+                "details": f"{len(upload_urls)} URL(s) reçue(s) pour {len(images)} image(s).",
+                "raw": init_data,
+            }
+
+        for image_bytes, upload_url in zip(images, upload_urls):
+            put_resp = await client.put(
+                upload_url,
+                content=image_bytes,
+                headers={"Content-Type": "image/jpeg"},
+            )
+            if put_resp.status_code not in (200, 201, 204):
+                return {
+                    "error": "upload_failed",
+                    "status_code": put_resp.status_code,
+                    "publish_id": publish_id,
+                }
+
+    return {"status": "submitted", "publish_id": publish_id}
+
+# --------------------------------------------------------------------------
 # MCP tools
 # --------------------------------------------------------------------------
 mcp = FastMCP(
@@ -159,6 +246,26 @@ async def get_video_stats(video_id: str) -> dict:
             return video
     return {"error": f"Vidéo {video_id} introuvable dans les 20 dernières vidéos."}
 
+@mcp.tool()
+async def post_slideshow(images_base64: list[str], caption: str = "") -> dict:
+    """
+    Publie un slideshow (post photo) sur TikTok.
+
+    images_base64 : liste des images du slideshow, chacune encodée en base64
+    (sans préfixe data:image/...;base64,), dans l'ordre d'affichage souhaité.
+    caption : légende/description du post (peut inclure hashtags).
+
+    Retourne le publish_id TikTok, ou un objet d'erreur si l'étape d'init
+    ou d'upload a échoué.
+    """
+    try:
+        image_bytes_list = [base64.b64decode(img) for img in images_base64]
+    except Exception as exc:
+        return {"error": "invalid_base64", "details": str(exc)}
+
+    access_token = await get_valid_access_token()
+    return await _publish_photo_slideshow(access_token, image_bytes_list, caption)
+
 # --------------------------------------------------------------------------
 # MCP OAuth 2.1 bridge
 #
@@ -185,7 +292,7 @@ async def oauth_metadata(request: Request):
         "grant_types_supported": ["authorization_code", "refresh_token"],
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["none"],
-        "scopes_supported": ["user.info.basic", "user.info.stats", "video.list"],
+        "scopes_supported": ["user.info.basic", "user.info.stats", "video.list", "video.publish"],
         "client_id_metadata_document_supported": False,
     })
 
@@ -193,7 +300,7 @@ async def protected_resource_metadata(request: Request):
     return JSONResponse({
         "resource": BASE_URL,
         "authorization_servers": [BASE_URL],
-        "scopes_supported": ["user.info.basic", "user.info.stats", "video.list"],
+        "scopes_supported": ["user.info.basic", "user.info.stats", "video.list", "video.publish"],
     })
 
 async def oauth_register(request: Request):
