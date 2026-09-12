@@ -154,6 +154,11 @@ async def serve_temp_image(request: Request):
     from starlette.responses import Response
     return Response(content=image_bytes, media_type="image/jpeg")
 
+# Fichier de vérification de domaine TikTok (méthode "URL prefix" / signature file).
+# Contenu et nom de fichier fournis par le dashboard TikTok for Developers.
+async def tiktok_domain_verification(request: Request):
+    return PlainTextResponse("tiktok-developers-site-verification=bBG53JSAQeJeHHXnSDHXKYNsxDO9uayf")
+
 # --------------------------------------------------------------------------
 # Publication de slideshows (posts photo) — Content Posting API
 # --------------------------------------------------------------------------
@@ -566,6 +571,7 @@ routes = [
     Route("/token", oauth_token, methods=["POST"]),
     Route("/auth", auth_start, methods=["GET"]),
     Route("/callback", tiktok_callback, methods=["GET"]),
+    Route("/temp-images/tiktokbBG53JSAQeJeHHXnSDHXKYNsxDO9uayf", tiktok_domain_verification, methods=["GET"]),
     Route("/temp-images/{image_id}", serve_temp_image, methods=["GET"]),
     Mount("/", app=mcp_app),
 ]
