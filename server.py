@@ -117,6 +117,44 @@ async def tiktok_post(url: str, json_body: dict | None = None, params: dict | No
     return resp.json()
 
 # --------------------------------------------------------------------------
+# Hébergement temporaire des images de slideshow
+#
+# L'API TikTok pour les POSTS PHOTO ne supporte que source=PULL_FROM_URL
+# (contrairement aux vidéos, qui acceptent aussi FILE_UPLOAD). TikTok doit
+# donc aller chercher chaque image sur une URL publique appartenant à un
+# domaine vérifié. On héberge temporairement les images ici, sur notre
+# propre domaine Railway (déjà utilisé pour le reste du service).
+# --------------------------------------------------------------------------
+_temp_images: dict[str, bytes] = {}
+TEMP_IMAGE_TTL_SECONDS = 15 * 60  # purge de sécurité, au cas où
+_temp_images_timestamps: dict[str, float] = {}
+
+def _store_temp_image(image_bytes: bytes) -> str:
+    image_id = secrets.token_urlsafe(16)
+    _temp_images[image_id] = image_bytes
+    _temp_images_timestamps[image_id] = time.time()
+    return image_id
+
+def _purge_old_temp_images():
+    now = time.time()
+    expired = [
+        image_id for image_id, ts in _temp_images_timestamps.items()
+        if now - ts > TEMP_IMAGE_TTL_SECONDS
+    ]
+    for image_id in expired:
+        _temp_images.pop(image_id, None)
+        _temp_images_timestamps.pop(image_id, None)
+
+async def serve_temp_image(request: Request):
+    _purge_old_temp_images()
+    image_id = request.path_params["image_id"].removesuffix(".jpg")
+    image_bytes = _temp_images.get(image_id)
+    if image_bytes is None:
+        return PlainTextResponse("Image introuvable ou expirée.", status_code=404)
+    from starlette.responses import Response
+    return Response(content=image_bytes, media_type="image/jpeg")
+
+# --------------------------------------------------------------------------
 # Publication de slideshows (posts photo) — Content Posting API
 # --------------------------------------------------------------------------
 async def _publish_photo_slideshow(
@@ -125,15 +163,22 @@ async def _publish_photo_slideshow(
     caption: str = "",
 ) -> dict:
     """
-    Initialise puis exécute la publication d'un slideshow photo sur TikTok.
+    Héberge temporairement les images sur notre domaine, puis initialise
+    la publication du slideshow photo sur TikTok via PULL_FROM_URL (seule
+    méthode supportée par TikTok pour les posts photo).
 
-    images : liste de contenus binaires (bytes) d'images JPEG/PNG déjà décodées.
+    images : liste de contenus binaires (bytes) d'images JPEG déjà décodées.
     Retourne le publish_id TikTok à utiliser pour vérifier le statut plus tard.
     """
     if not images:
         raise ValueError("Aucune image fournie pour le slideshow.")
     if len(images) > 35:
         raise ValueError("TikTok limite les slideshows à 35 photos maximum.")
+
+    image_urls = []
+    for image_bytes in images:
+        image_id = _store_temp_image(image_bytes)
+        image_urls.append(f"{BASE_URL}/temp-images/{image_id}.jpg")
 
     init_payload = {
         "post_info": {
@@ -143,11 +188,9 @@ async def _publish_photo_slideshow(
             "auto_add_music": True,
         },
         "source_info": {
-            "source": "FILE_UPLOAD",
+            "source": "PULL_FROM_URL",
             "photo_cover_index": 0,
-            "photo_images": [
-                {"index": i} for i in range(len(images))
-            ],
+            "photo_images": image_urls,
         },
         "post_mode": "DIRECT_POST",
         "media_type": "PHOTO",
@@ -164,38 +207,11 @@ async def _publish_photo_slideshow(
         )
         init_data = init_resp.json()
 
-        if "data" not in init_data or "publish_id" not in init_data.get("data", {}):
-            return {"error": "init_failed", "details": init_data}
+    if "data" not in init_data or "publish_id" not in init_data.get("data", {}):
+        return {"error": "init_failed", "details": init_data, "image_urls": image_urls}
 
-        publish_id = init_data["data"]["publish_id"]
-        upload_urls = init_data["data"].get("upload_url", [])
-
-        # TikTok peut renvoyer une seule upload_url couvrant toutes les photos,
-        # ou une par photo selon les comptes/versions d'API. On gère les deux cas.
-        if isinstance(upload_urls, str):
-            upload_urls = [upload_urls] * len(images)
-
-        if len(upload_urls) != len(images):
-            return {
-                "error": "upload_url_mismatch",
-                "details": f"{len(upload_urls)} URL(s) reçue(s) pour {len(images)} image(s).",
-                "raw": init_data,
-            }
-
-        for image_bytes, upload_url in zip(images, upload_urls):
-            put_resp = await client.put(
-                upload_url,
-                content=image_bytes,
-                headers={"Content-Type": "image/jpeg"},
-            )
-            if put_resp.status_code not in (200, 201, 204):
-                return {
-                    "error": "upload_failed",
-                    "status_code": put_resp.status_code,
-                    "publish_id": publish_id,
-                }
-
-    return {"status": "submitted", "publish_id": publish_id}
+    publish_id = init_data["data"]["publish_id"]
+    return {"status": "submitted", "publish_id": publish_id, "image_urls": image_urls}
 
 # --------------------------------------------------------------------------
 # MCP tools
@@ -483,6 +499,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
             "/callback",
             "/auth",
             "/.well-known/",
+            "/temp-images/",
         )
         if request.url.path.startswith(public_paths):
             return await call_next(request)
@@ -549,6 +566,7 @@ routes = [
     Route("/token", oauth_token, methods=["POST"]),
     Route("/auth", auth_start, methods=["GET"]),
     Route("/callback", tiktok_callback, methods=["GET"]),
+    Route("/temp-images/{image_id}", serve_temp_image, methods=["GET"]),
     Mount("/", app=mcp_app),
 ]
 
